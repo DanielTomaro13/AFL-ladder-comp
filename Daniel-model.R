@@ -2,6 +2,7 @@
 # Load libaries
 library(dplyr) # For data manipulation
 library(fitzRoy) # For AFL data
+library(tidyr)
 
 # Fetch data using FitzRoy package functions
 # See FitzRoy documentation 
@@ -10,14 +11,17 @@ standard_results <- fetch_results_afltables(1897:2025)
 colnames(standard_results)
 
 player_results <- fetch_player_stats_afltables(1990:2025)
+colSums(is.na(player_results))
 colnames(player_results)
+player_results <- player_results %>%
+  mutate(across(where(is.numeric), ~replace_na(., 0)))
 
 # Data Manipulation
 
 player_results_clean <- player_results %>%
   mutate(FullName = paste(First.name, Surname)) %>%
   select(
-    Season, Round, Date, Venue, Attendance,
+    Season, Round, Date, Venue,
     FullName, PlayerID = ID,
     TeamPlayedFor = Playing.for,
     
@@ -25,13 +29,12 @@ player_results_clean <- player_results %>%
     HitOuts = Hit.Outs, Tackles, Rebound50s = Rebounds,
     Inside50s = Inside.50s, Clearances, Clangers,
     FreesFor = Frees.For, FreesAgainst = Frees.Against,
-    BrownlowVotes = Brownlow.Votes,
     ContestedPossessions = Contested.Possessions,
     UncontestedPossessions = Uncontested.Possessions,
     ContestedMarks = Contested.Marks,
     MarksInside50 = Marks.Inside.50, OnePercenters = One.Percenters,
-    Bounces, GoalAssists = Goal.Assists,
-    TimeOnGroundPercentage = Time.on.Ground, Substitute,
+    GoalAssists = Goal.Assists,
+
     
     HomeTeam = Home.team,
     HomeQ1Goals = HQ1G, HomeQ1Behinds = HQ1B,
@@ -58,11 +61,11 @@ player_results_clean <- player_results %>%
     AwayExtraTimePoints = AQETP,
     
     Team, Age, CareerGames = Career.Games,
-    DateOfBirth = DOB, HomeOrAway = Home.Away
+    HomeOrAway = Home.Away
   )
 
 team_game_stats <- player_results_clean %>%
-  group_by(Season, Round, Date, Venue, Attendance,
+  group_by(Season, Round, Date, Venue,
            TeamPlayedFor, HomeOrAway,
            HomeTeam, AwayTeam,
            HomeScore, AwayScore,
@@ -129,7 +132,7 @@ team_game_stats <- team_game_stats %>%
     OpponentELO = NA_real_
   ) %>%
   select(
-    Season, Round, Date, MatchType, Venue, Attendance,
+    Season, Round, Date, MatchType, Venue, 
     TeamPlayedFor, Opponent, HomeOrAway, Result,
     TeamScore, OpponentScore,
     Q1Goals, Q1Behinds, Q2Goals, Q2Behinds, Q3Goals, Q3Behinds,
@@ -232,16 +235,44 @@ results <- results %>%
 # Run Logistic Regression Model 
 # We use logistic regression as it is a classification model, there are two outcomes, win or lose therefore it will output a probability between 0-1. 
 
-results <- results %>%
+# Adding Team Averages
+results_with_team_averages <- results %>%
+  arrange(TeamPlayedFor, Season, Date) %>%
+  group_by(TeamPlayedFor, Season) %>%
+  mutate(
+    GameNumber = row_number(),
+    
+    Avg_Disposals = lag(cummean(Disposals)),
+    Avg_Kicks = lag(cummean(Kicks)),
+    Avg_Handballs = lag(cummean(Handballs)),
+    Avg_Marks = lag(cummean(Marks)),
+    Avg_Tackles = lag(cummean(Tackles)),
+    Avg_Clearances = lag(cummean(Clearances)),
+    Avg_Inside50s = lag(cummean(Inside50s)),
+    Avg_ContestedPossessions = lag(cummean(ContestedPossessions)),
+    Avg_UncontestedPossessions = lag(cummean(UncontestedPossessions)),
+    Avg_Goals = lag(cummean(Goals)),
+    Avg_Behinds = lag(cummean(Behinds)),
+    Avg_Clangers = lag(cummean(Clangers)),
+    Avg_OnePercenters = lag(cummean(OnePercenters))
+  ) %>%
+  ungroup()
+
+results <- results_with_team_averages %>%
   mutate(Result_Binary = Result)  
+
+colSums(is.na(results))
+results <- na.omit(results)
 
 elo_model <- glm(
   Result_Binary ~ Elo_Difference + HomeOrAway + MatchType +
     SignificantVenue + IsMCG + IsFirst5Rounds + IsLast5Rounds +
-    IsInterstateTeam,
+    IsInterstateTeam +
+    Avg_Disposals + Avg_Clearances + Avg_Inside50s + Avg_ContestedPossessions,
   family = binomial,
   data = results
 )
+
 
 summary(elo_model)
 
@@ -252,16 +283,12 @@ summary(elo_model)
 ## Test Model
 
 results$Predicted_Prob <- predict(elo_model, type = "response")
-# results$Predicted_Result <- ifelse(results$Predicted_Prob >= 0.5, 1, 0)
 
-# Accuracy of the model
 results <- results %>%
   mutate(GLM_Forecast = ifelse(Predicted_Prob > 0.5, 1, 0),
          GLM_Correct = ifelse(GLM_Forecast == Result_Binary, 1, 0))
 
-glm_accuracy <- mean(results$GLM_Correct, na.rm = TRUE)
-glm_accuracy * 100
-
+mean(results$GLM_Correct, na.rm = TRUE) * 100
 ## Predict and filter for 2025
 
 results_2025 <- results %>% filter(Season == 2025)
