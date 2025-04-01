@@ -162,7 +162,22 @@ team_game_stats_numeric <- team_game_stats %>%
       MatchType == "Finals" ~ 1,
       MatchType == "Regular Season" ~ 0,
       TRUE ~ NA_real_
-    )
+    ),
+    SignificantVenue = case_when(
+      Team %in% c("Adelaide", "Port Adelaide") & Venue == "Adelaide Oval" ~ 1,
+      Team == "Geelong" & Venue %in% c("GMHBA Stadium", "Kardinia Park") ~ 1,
+      Team %in% c("West Coast", "Fremantle") & Venue %in% c("Optus Stadium", "Subiaco Oval") ~ 1,
+      TRUE ~ 0
+    ),
+    IsInterstateTeam = if_else(Team %in% c(
+      "West Coast", "Fremantle",      # WA
+      "Adelaide", "Port Adelaide",    # SA
+      "Brisbane", "Gold Coast",       # QLD
+      "Sydney", "GWS"                 # NSW
+    ), 1, 0),
+    IsMCG = if_else(Venue == "MCG", 1, 0),
+    IsFirst5Rounds = if_else(Round <= 5, 1, 0),
+    IsLast5Rounds = if_else(Round >= 19 & MatchType == 0, 1, 0)
   )
 
 # Creating a teams data frame 
@@ -221,14 +236,18 @@ results <- results %>%
   mutate(Result_Binary = Result)  
 
 elo_model <- glm(
-  Result_Binary ~ Elo_Difference + HomeOrAway + MatchType, 
+  Result_Binary ~ Elo_Difference + HomeOrAway + MatchType +
+    SignificantVenue + IsMCG + IsFirst5Rounds + IsLast5Rounds +
+    IsShortRest + IsInterstateTeam,
   family = binomial,
   data = results
 )
 
 summary(elo_model)
 
-# Add form eventually and also team averages
+# Add form eventually and also team averages, consecutive wins and losses, travel distance, primetime or not game,
+# round number, season averages, player strength through brownlow votes or games etc, ELO changes over last 5 games,
+# weather wetweather 1 or 0, interaction terms 
 
 ## Test Model
 
