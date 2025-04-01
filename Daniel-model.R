@@ -238,7 +238,7 @@ results <- results %>%
 elo_model <- glm(
   Result_Binary ~ Elo_Difference + HomeOrAway + MatchType +
     SignificantVenue + IsMCG + IsFirst5Rounds + IsLast5Rounds +
-    IsShortRest + IsInterstateTeam,
+    IsInterstateTeam,
   family = binomial,
   data = results
 )
