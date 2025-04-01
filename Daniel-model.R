@@ -217,26 +217,48 @@ results <- results %>%
 # Run Logistic Regression Model 
 # We use logistic regression as it is a classification model, there are two outcomes, win or lose therefore it will output a probability between 0-1. 
 
+results <- results %>%
+  mutate(Result_Binary = Result)  
 
+elo_model <- glm(
+  Result_Binary ~ Elo_Difference + HomeOrAway + MatchType, 
+  family = binomial,
+  data = results
+)
 
+summary(elo_model)
 
-
+# Add form eventually and also team averages
 
 ## Test Model
 
+results$Predicted_Prob <- predict(elo_model, type = "response")
+# results$Predicted_Result <- ifelse(results$Predicted_Prob >= 0.5, 1, 0)
 
+# Accuracy of the model
+results <- results %>%
+  mutate(GLM_Forecast = ifelse(Predicted_Prob > 0.5, 1, 0),
+         GLM_Correct = ifelse(GLM_Forecast == Result_Binary, 1, 0))
 
-
+glm_accuracy <- mean(results$GLM_Correct, na.rm = TRUE)
+glm_accuracy * 100
 
 ## Predict and filter for 2025
 
+results_2025 <- results %>% filter(Season == 2025)
 
+# Accuracy of the model
+results_2025 <- results_2025 %>%
+  mutate(GLM_Forecast = ifelse(Predicted_Prob > 0.5, 1, 0),
+         GLM_Correct = ifelse(GLM_Forecast == Result_Binary, 1, 0))
 
+glm_accuracy_2025 <- mean(results_2025$GLM_Correct, na.rm = TRUE)
+glm_accuracy_2025 * 100
 
 # Ladder creation - my dataset is called results_2025 
 # ACTUAL ladder
 ladder_actual <- results_2025 %>%
-  group_by(Team) %>%
+  group_by(TeamPlayedFor) %>%
   summarise(
     Games = n(),
     Wins_Actual = sum(Result == 1),
@@ -244,26 +266,25 @@ ladder_actual <- results_2025 %>%
     Draws_Actual = sum(Result == 0.5),
     WinPct_Actual = round(mean(Result) * 100, 1),
     Points_Actual = Wins_Actual * 4 + Draws_Actual * 2,
-    Points_For = sum(Points_For),
-    Points_Against = sum(Points_Against),
+    Points_For = sum(TeamScore),
+    Points_Against = sum(OpponentScore),
     Percentage_Actual = round((Points_For / Points_Against) * 100, 1)
   )
 
 # PREDICTED ladder
 ladder_predicted <- results_2025 %>%
-  group_by(Team) %>%
+  group_by(TeamPlayedFor) %>%
   summarise(
     Wins_Pred = sum(GLM_Forecast == 1),
     Losses_Pred = sum(GLM_Forecast == 0),
-    Draws_Pred = sum(Win_Prob_Pred > 0.45 & Win_Prob_Pred < 0.55),  # optional
     WinPct_Pred = round(mean(GLM_Forecast) * 100, 1),
-    Points_Pred = Wins_Pred * 4 + Draws_Pred * 2,
-    Percentage_Pred = round((sum(Points_For) / sum(Points_Against)) * 100, 1)
+    Points_Pred = Wins_Pred * 4,
+    Percentage_Pred = round((sum(TeamScore) / sum(OpponentScore)) * 100, 1)
   )
 
 # Merge both ladders
 ladder_comparison <- ladder_actual %>%
-  left_join(ladder_predicted, by = "Team") %>%
+  left_join(ladder_predicted, by = "TeamPlayedFor") %>%
   arrange(desc(Points_Actual))
 
 ladder_comparison <- ladder_comparison %>%
