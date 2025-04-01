@@ -164,12 +164,12 @@ team_game_stats_numeric <- team_game_stats %>%
       TRUE ~ NA_real_
     ),
     SignificantVenue = case_when(
-      Team %in% c("Adelaide", "Port Adelaide") & Venue == "Adelaide Oval" ~ 1,
-      Team == "Geelong" & Venue %in% c("GMHBA Stadium", "Kardinia Park") ~ 1,
-      Team %in% c("West Coast", "Fremantle") & Venue %in% c("Optus Stadium", "Subiaco Oval") ~ 1,
+      TeamPlayedFor %in% c("Adelaide", "Port Adelaide") & Venue == "Adelaide Oval" ~ 1,
+      TeamPlayedFor == "Geelong" & Venue %in% c("GMHBA Stadium", "Kardinia Park") ~ 1,
+      TeamPlayedFor %in% c("West Coast", "Fremantle") & Venue %in% c("Optus Stadium", "Subiaco Oval") ~ 1,
       TRUE ~ 0
     ),
-    IsInterstateTeam = if_else(Team %in% c(
+    IsInterstateTeam = if_else(TeamPlayedFor %in% c(
       "West Coast", "Fremantle",      # WA
       "Adelaide", "Port Adelaide",    # SA
       "Brisbane", "Gold Coast",       # QLD
