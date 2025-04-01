@@ -35,7 +35,6 @@ player_results_clean <- player_results %>%
     MarksInside50 = Marks.Inside.50, OnePercenters = One.Percenters,
     GoalAssists = Goal.Assists,
 
-    
     HomeTeam = Home.team,
     HomeQ1Goals = HQ1G, HomeQ1Behinds = HQ1B,
     HomeQ2Goals = HQ2G, HomeQ2Behinds = HQ2B,
@@ -147,6 +146,7 @@ team_game_stats <- team_game_stats %>%
 
 # Making columns numeric
 str(team_game_stats)
+
 # Create numeric columns for ELO modeling
 team_game_stats_numeric <- team_game_stats %>%
   mutate(
@@ -178,9 +178,9 @@ team_game_stats_numeric <- team_game_stats %>%
       "Brisbane", "Gold Coast",       # QLD
       "Sydney", "GWS"                 # NSW
     ), 1, 0),
-    IsMCG = if_else(Venue == "MCG", 1, 0),
     IsFirst5Rounds = if_else(Round <= 5, 1, 0),
-    IsLast5Rounds = if_else(Round >= 19 & MatchType == 0, 1, 0)
+    IsLast5Rounds = if_else(Round >= 19 & MatchType == 0, 1, 0),
+    IsBigGameDay = if_else(weekdays(as.Date(Date)) %in% c("Thursday", "Friday", "Monday"), 1, 0)
   )
 
 # Creating a teams data frame 
@@ -235,44 +235,24 @@ results <- results %>%
 # Run Logistic Regression Model 
 # We use logistic regression as it is a classification model, there are two outcomes, win or lose therefore it will output a probability between 0-1. 
 
-# Adding Team Averages
-results_with_team_averages <- results %>%
-  arrange(TeamPlayedFor, Season, Date) %>%
-  group_by(TeamPlayedFor, Season) %>%
-  mutate(
-    GameNumber = row_number(),
-    
-    Avg_Disposals = lag(cummean(Disposals)),
-    Avg_Kicks = lag(cummean(Kicks)),
-    Avg_Handballs = lag(cummean(Handballs)),
-    Avg_Marks = lag(cummean(Marks)),
-    Avg_Tackles = lag(cummean(Tackles)),
-    Avg_Clearances = lag(cummean(Clearances)),
-    Avg_Inside50s = lag(cummean(Inside50s)),
-    Avg_ContestedPossessions = lag(cummean(ContestedPossessions)),
-    Avg_UncontestedPossessions = lag(cummean(UncontestedPossessions)),
-    Avg_Goals = lag(cummean(Goals)),
-    Avg_Behinds = lag(cummean(Behinds)),
-    Avg_Clangers = lag(cummean(Clangers)),
-    Avg_OnePercenters = lag(cummean(OnePercenters))
-  ) %>%
-  ungroup()
+# Team averages add
 
-results <- results_with_team_averages %>%
-  mutate(Result_Binary = Result)  
+results <- results%>%
+  mutate(Result_Binary = Result) 
+results <- results %>% filter(Result_Binary != 0.5)
+
 
 colSums(is.na(results))
 results <- na.omit(results)
 
 elo_model <- glm(
-  Result_Binary ~ Elo_Difference + HomeOrAway + MatchType +
-    SignificantVenue + IsMCG + IsFirst5Rounds + IsLast5Rounds +
-    IsInterstateTeam +
-    Avg_Disposals + Avg_Clearances + Avg_Inside50s + Avg_ContestedPossessions,
+  Result_Binary ~ 
+    Elo_Difference + HomeOrAway + MatchType +
+    SignificantVenue + IsFirst5Rounds + IsLast5Rounds +
+    IsInterstateTeam + IsBigGameDay,   
   family = binomial,
   data = results
 )
-
 
 summary(elo_model)
 
