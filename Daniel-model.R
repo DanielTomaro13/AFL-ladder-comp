@@ -4,6 +4,7 @@ library(lubridate)
 library(tidyr)
 library(ggplot2) 
 library(fitzRoy) 
+library(slider)
 #####################################################
 results <- fetch_results_afltables(1897:2012)
 restructure_afl_data <- function(afl_data) {
@@ -143,11 +144,13 @@ team_game_stats <- afl_player_stats %>%
     
     kicks = sum(kicks, na.rm = TRUE),
     handballs = sum(handballs, na.rm = TRUE),
+    kick_to_handball_ratio = sum(kicks / handballs, na.rm = TRUE),
     disposals = sum(disposals, na.rm = TRUE),
     marks = sum(marks, na.rm = TRUE),
     tackles = sum(tackles, na.rm = TRUE),
     contested_possessions = sum(contestedPossessions, na.rm = TRUE),
     uncontested_possessions = sum(uncontestedPossessions, na.rm = TRUE),
+    contested_ratio = sum(contested_possessions/uncontested_possessions, na.rm = TRUE),
     inside50s = sum(inside50s, na.rm = TRUE),
     rebound50s = sum(rebound50s, na.rm = TRUE),
     clearances = sum(clearances.totalClearances, na.rm = TRUE),
@@ -282,21 +285,69 @@ final_results <- final_results %>%
   mutate(Home = ifelse(team == home_team, 1, 0))
 
 final_results <- final_results %>%
-  filter(result %in% c(0, 1)) %>%  # Drop draws
-  mutate(
-    Home = ifelse(is_home == 1, 1, 0)  
-  )
+  filter(result %in% c(0, 1)) # Drop draws
+
 
 #####################################################
 # Add features here
+#####################################################
+# Add team averages which teams like Richmond, Brisbane 3 peat, Hawks 3 peat dominated in
+team_stats_cols <- c(  "tackles", 
+                       "pressure_acts", 
+                       "tackles_inside50", 
+                       "ground_ball_gets", 
+                       "contested_possessions", 
+                       "inside50s",
+                       "intercepts",
+                       "contested_ratio",
+                       "kick_to_handball_ratio")
+final_results <- final_results %>%
+  arrange(team, date) %>%
+  group_by(team) %>%
+  mutate(across(
+    all_of(team_stats_cols),
+    ~ coalesce(lag(cummean(.)), 0),
+    .names = "avg_{.col}"
+  )) %>%
+  ungroup()
+
+opponent_avgs <- final_results %>%
+  select(date, team, starts_with("avg_")) %>%
+  rename_with(~ paste0("opp_", .), starts_with("avg_")) %>%
+  rename(opponent = team)
+
+final_results <- final_results %>%
+  left_join(opponent_avgs, by = c("date", "opponent"))
+
+stat_diff_cols <- c("tackles", "pressure_acts", "tackles_inside50", "ground_ball_gets", 
+                    "contested_possessions", "inside50s", "intercepts", 
+                    "contested_ratio", "kick_to_handball_ratio")
+
+for (stat in stat_diff_cols) {
+  final_results[[paste0("diff_", stat)]] <- final_results[[paste0("avg_", stat)]] - final_results[[paste0("opp_avg_", stat)]]
+}
+
+#####################################################
+# Add team form
+
 
 #####################################################
 
 # Run Logistic Regression Model 
 
 win_prob_glm_1 <- glm(
-  result ~ Elo_Difference + Home, 
-  data = final_results
+  result ~ Elo_Difference + Home +
+    diff_tackles +
+    diff_pressure_acts +
+    diff_tackles_inside50 +
+    diff_ground_ball_gets +
+    diff_contested_possessions +
+    diff_inside50s +
+    diff_intercepts +
+    diff_contested_ratio +
+    diff_kick_to_handball_ratio,
+  data = final_results,
+  family = "binomial"
 )
 
 summary(win_prob_glm_1)
@@ -334,7 +385,6 @@ ladder_actual <- results_2025 %>%
     Wins_Actual = sum(result == 1),
     Losses_Actual = sum(result == 0),
     Draws_Actual = sum(result == 0.5),
-    WinPct_Actual = round(mean(result) * 100, 1),
     Points_Actual = Wins_Actual * 4 + Draws_Actual * 2,
   )
 
