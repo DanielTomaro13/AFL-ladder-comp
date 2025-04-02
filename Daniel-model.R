@@ -1,227 +1,356 @@
 #####################################################
-library(dplyr) # For data manipulation
-library(fitzRoy) # For AFL data
+library(dplyr)
+library(lubridate)
 library(tidyr)
+library(ggplot2) 
+library(fitzRoy) 
 #####################################################
-footywire <- fetch_player_stats_footywire(2009:2025)
-footywire <- footywire %>% select(
-  Date, Season, Round, Venue, Player, Team, Opposition, Status, Match_id,
-  GA, CP, UP, ED, DE, CM, MI5, One.Percenters, BO, TOG, K, HB, D, M, G, B, T,
-  HO, I50, CL, CG, R50, FF, FA, AF, SC
-)
-colnames(footywire)
-colSums(is.na(footywire))
-player_results <- na.omit(footywire)
-#####################################################
-# Data Manipulation
-team_scores <- player_results %>%
-  group_by(Match_id, Team, Status) %>%
-  summarise(
-    TeamGoals = sum(G, na.rm = TRUE),
-    TeamBehinds = sum(B, na.rm = TRUE),
-    TeamScore = TeamGoals * 6 + TeamBehinds,
-    .groups = "drop"
+results <- fetch_results_afltables(1897:2012)
+restructure_afl_data <- function(afl_data) {
+  afl_home <- data.frame(
+    Date = afl_data$Date,
+    Season = afl_data$Season,
+    Team = afl_data$Home.Team,
+    Opponent = afl_data$Away.Team,
+    Result = ifelse(afl_data$Home.Points > afl_data$Away.Points, "W", "L"),
+    Points_For = afl_data$Home.Points,
+    Points_Against = afl_data$Away.Points,
+    Spread = afl_data$Home.Points - afl_data$Away.Points,
+    Played = TRUE,
+    Home = TRUE,
+    Game_ID = afl_data$Game,
+    ELO = NA,
+    Opp_ELO = NA
   )
-player_results_clean <- player_results %>%
-  left_join(team_scores, by = c("Match_id", "Team", "Status")) %>%
+  afl_away <- data.frame(
+    Date = afl_data$Date,
+    Season = afl_data$Season,
+    Team = afl_data$Away.Team,
+    Opponent = afl_data$Home.Team,
+    Result = ifelse(afl_data$Away.Points > afl_data$Home.Points, "W", "L"),
+    Points_For = afl_data$Away.Points,
+    Points_Against = afl_data$Home.Points,
+    Spread = afl_data$Away.Points - afl_data$Home.Points,
+    Played = TRUE,
+    Home = FALSE,
+    Game_ID = afl_data$Game,
+    ELO = NA,
+    Opp_ELO = NA
+  )
+  return(bind_rows(afl_home, afl_away))
+}
+traditional_results <- restructure_afl_data(results)
+colnames(traditional_results)
+
+traditional_results <- traditional_results %>% mutate(
+  ELO = 0,
+  Opp_ELO = 0,
+  Result = ifelse(Result == "W", 1, Result),
+  Result = ifelse(Result == "L", 0, Result),
+  Result = ifelse(Result == "T", 0.5, Result),
+  Result = as.numeric(Result)
+)
+
+teams_elo <- unique(c(traditional_results$Team))
+
+teams_elo <- data.frame(
+  Team = teams_elo,
+  ELO = 1500,
+  stringsAsFactors = FALSE
+)
+
+teams_elo <- teams_elo[order(teams_elo$Team), ]
+
+#####################################################
+# The creation of ELO
+library(elo)
+
+for(i in 1:nrow(traditional_results)){
+  if(i %% 2 != 0){ 
+    # i = 1
+    print(i)
+    
+    Team_A <- traditional_results$Team[i]
+    Team_B <- traditional_results$Team[i+1]
+    
+    Result_A <- traditional_results$Result[i]
+    Result_B <- traditional_results$Result[i+1]
+    
+    ELO_A <- as.numeric(teams_elo[teams_elo$Team == Team_A, "ELO"])
+    ELO_B <- as.numeric(teams_elo[teams_elo$Team == Team_B, "ELO"])
+    
+    traditional_results$ELO[i] <- ELO_A
+    traditional_results$Opp_ELO[i] <- ELO_B
+    
+    traditional_results$ELO[i+1] <- ELO_B
+    traditional_results$Opp_ELO[i+1] <- ELO_A
+    
+    R_A <- 10^(ELO_A/400)
+    R_B <- 10^(ELO_B/400)
+    
+    E_A <- R_A/(R_A + R_B)
+    E_B <- R_B/(R_A + R_B)
+    
+    Elo_Updated_A <- ELO_A + 20 * (Result_A - E_A) # Our K value here is 20, the K value controls how much ELO moves after each game, higher more dramatically and lower less. 
+    Elo_Updated_B <- ELO_B + 20 * (Result_B - E_B)
+    
+    teams_elo[teams_elo$Team == Team_A, "ELO"] <- Elo_Updated_A
+    teams_elo[teams_elo$Team == Team_B, "ELO"] <- Elo_Updated_B
+    
+  }
+}
+
+traditional_results <- traditional_results %>%
+  mutate(Elo_Difference = ELO - Opp_ELO)
+
+traditional_results <- traditional_results %>%
+  mutate(Result_Binary = Result)  
+#####################################################
+seasons <- 2013:2025
+afl_player_stats_list <- list()
+for (season in seasons) {
+  results <- fetch_player_stats(season = season, source = "AFL", comp = "AFLM")
+  afl_player_stats_list[[as.character(season)]] <- results
+}
+all_cols <- unique(unlist(lapply(afl_player_stats_list, names)))
+afl_player_stats_list <- lapply(afl_player_stats_list, function(df) {
+  missing_cols <- setdiff(all_cols, names(df))
+  df[missing_cols] <- NA
+  return(df[all_cols])
+})
+
+afl_player_stats <- do.call(rbind, afl_player_stats_list)
+afl_player_stats <- afl_player_stats %>% 
   mutate(
-    HomeTeam = ifelse(Status == "Home", Team, Opposition),
-    AwayTeam = ifelse(Status == "Away", Team, Opposition),
-    HomeScore = ifelse(Status == "Home", TeamScore, NA),
-    AwayScore = ifelse(Status == "Away", TeamScore, NA)
+    date = as.Date(utcStartTime),
+    season =year(date)
+  )
+colnames(afl_player_stats)
+
+team_game_stats <- afl_player_stats %>%
+  mutate(
+    round = round.roundNumber,
+    team = team.name,
+    home_team = home.team.name,
+    opponent = ifelse(team.name == home.team.name, away.team.name, home.team.name),
+    game_id = paste0(season, "_", round, "_", pmin(home.team.name, away.team.name), "_vs_", pmax(home.team.name, away.team.name))  # unique game identifier
   ) %>%
-  group_by(Match_id) %>%
-  fill(HomeScore, AwayScore, .direction = "downup") %>%
-  ungroup() %>%
-  select(
-    Season, Round, Date, Venue,
-    Player, Team, Opposition, Status,
-    GA, CP, UP, ED, DE, CM, MI5, One.Percenters, BO,
-    TOG, K, HB, D, M, G, B, T, HO, I50, CL, CG, R50,
-    FF, FA, AF, SC,
-    HomeTeam, AwayTeam, HomeScore, AwayScore,
-    HomeOrAway = Status
+  group_by(season, round, date, venue = venue.name, game_id, team, home_team, opponent) %>%
+  summarise(
+    goals = sum(goals, na.rm = TRUE),
+    behinds = sum(behinds, na.rm = TRUE),
+    total_score = goals * 6 + behinds,
+    
+    kicks = sum(kicks, na.rm = TRUE),
+    handballs = sum(handballs, na.rm = TRUE),
+    disposals = sum(disposals, na.rm = TRUE),
+    marks = sum(marks, na.rm = TRUE),
+    tackles = sum(tackles, na.rm = TRUE),
+    contested_possessions = sum(contestedPossessions, na.rm = TRUE),
+    uncontested_possessions = sum(uncontestedPossessions, na.rm = TRUE),
+    inside50s = sum(inside50s, na.rm = TRUE),
+    rebound50s = sum(rebound50s, na.rm = TRUE),
+    clearances = sum(clearances.totalClearances, na.rm = TRUE),
+    metres_gained = sum(metresGained, na.rm = TRUE),
+    score_involvements = sum(scoreInvolvements, na.rm = TRUE),
+    turnovers = sum(turnovers, na.rm = TRUE),
+    intercepts = sum(intercepts, na.rm = TRUE),
+    tackles_inside50 = sum(tacklesInside50, na.rm = TRUE),
+    pressure_acts = sum(extendedStats.pressureActs, na.rm = TRUE),
+    ground_ball_gets = sum(extendedStats.groundBallGets, na.rm = TRUE),
+    contested_marks = sum(contestedMarks, na.rm = TRUE),
+    one_percenters = sum(onePercenters, na.rm = TRUE),
+    disposal_efficiency = mean(disposalEfficiency, na.rm = TRUE),
+    clangers = sum(clangers, na.rm = TRUE),
+    .groups = "drop"
   )
 
-team_game_stats <- player_results_clean %>%
-  group_by(
-    Season, Round, Date, Venue,
-    TeamPlayedFor = Team, 
-    HomeOrAway,
-    HomeTeam, AwayTeam,
-    HomeScore, AwayScore
-  ) %>%
-  summarise(
-    TotalPlayers = n(),
-    Disposals = sum(D, na.rm = TRUE),
-    Kicks = sum(K, na.rm = TRUE),
-    Handballs = sum(HB, na.rm = TRUE),
-    Marks = sum(M, na.rm = TRUE),
-    Goals = sum(G, na.rm = TRUE),
-    Behinds = sum(B, na.rm = TRUE),
-    HitOuts = sum(HO, na.rm = TRUE),
-    Tackles = sum(T, na.rm = TRUE),
-    Inside50s = sum(I50, na.rm = TRUE),
-    Clearances = sum(CL, na.rm = TRUE),
-    Clangers = sum(CG, na.rm = TRUE),
-    FreesFor = sum(FF, na.rm = TRUE),
-    FreesAgainst = sum(FA, na.rm = TRUE),
-    ContestedPossessions = sum(CP, na.rm = TRUE),
-    UncontestedPossessions = sum(UP, na.rm = TRUE),
-    ContestedMarks = sum(CM, na.rm = TRUE),
-    MarksInside50 = sum(MI5, na.rm = TRUE),
-    OnePercenters = sum(One.Percenters, na.rm = TRUE),
-    GoalAssists = sum(GA, na.rm = TRUE),
-    SuperCoach = sum(SC, na.rm = TRUE),
-    .groups = "drop"
+team_game_results <- team_game_stats %>%
+  left_join(
+    team_game_stats %>%
+      select(game_id, opponent_score = total_score, opponent_team = team),
+    by = c("game_id" = "game_id", "opponent" = "opponent_team")
   ) %>%
   mutate(
-    TeamScore = if_else(TeamPlayedFor == HomeTeam, HomeScore, AwayScore),
-    Opponent = if_else(TeamPlayedFor == HomeTeam, AwayTeam, HomeTeam),
-    OpponentScore = if_else(TeamPlayedFor == HomeTeam, AwayScore, HomeScore),
-    
-    Result = case_when(
-      TeamScore > OpponentScore ~ "Win",
-      TeamScore < OpponentScore ~ "Loss",
+    margin = total_score - opponent_score,
+    result = case_when(
+      margin > 0 ~ "Win",
+      margin < 0 ~ "Loss",
       TRUE ~ "Draw"
     )
   )
 
-team_game_stats_numeric <- team_game_stats %>%
+team_game_results <- team_game_results %>%
   mutate(
-    Result = case_when(
-      Result == "Win" ~ 1,
-      Result == "Loss" ~ 0,
-      Result == "Draw" ~ 0.5,
+    result = case_when(
+      result == "Win" ~ 1,
+      result == "Loss" ~ 0,
+      result == "Draw" ~ 0.5,
       TRUE ~ NA_real_
-    ),
-    HomeOrAway = case_when(
-      HomeOrAway == "Home" ~ 1,
-      HomeOrAway == "Away" ~ 0,
-      TRUE ~ NA_real_
-    ),
-    IsInterstateTeam = if_else(TeamPlayedFor %in% c(
-      "West Coast", "Fremantle", "Adelaide", "Port Adelaide",
-      "Brisbane", "Gold Coast", "Sydney", "GWS"
-    ), 1, 0),
-    IsBigGameDay = if_else(weekdays(as.Date(Date)) %in% c("Thursday", "Friday", "Monday"), 1, 0),
-    ELO = NA_real_,
-    OpponentELO = NA_real_
+    )
   )
 
-results <- team_game_stats_numeric
-teams_elo <- unique(c(results$TeamPlayedFor))
-
-teams_elo <- data.frame(
-  Team = unique(results$TeamPlayedFor),
-  ELO = 1500,
-  stringsAsFactors = FALSE
-)
-teams_elo <- teams_elo[order(teams_elo$Team), ]
 #####################################################
-library(elo)
+team_name_map <- c(
+  "Fitzroy" = NA,  # No longer active
+  "Collingwood" = "Collingwood",
+  "Geelong" = "Geelong Cats",
+  "Sydney" = "Sydney Swans",
+  "Essendon" = "Essendon",
+  "St Kilda" = "St Kilda",
+  "Melbourne" = "Melbourne",
+  "Carlton" = "Carlton",
+  "Richmond" = "Richmond",
+  "University" = NA,  # No longer active
+  "Hawthorn" = "Hawthorn",
+  "North Melbourne" = "North Melbourne",
+  "Footscray" = "Western Bulldogs",  # Rebranded
+  "West Coast" = "West Coast Eagles",
+  "Brisbane Lions" = "Brisbane Lions",
+  "Adelaide" = "Adelaide Crows",
+  "Fremantle" = "Fremantle",
+  "Port Adelaide" = "Port Adelaide",
+  "Gold Coast" = "Gold Coast SUNS",
+  "GWS" = "GWS GIANTS"
+)
+traditional_results <- traditional_results %>%
+  mutate(
+    team_mapped = team_name_map[Team],
+    opponent_mapped = team_name_map[Opponent]
+  )
+final_elo_2012 <- traditional_results %>%
+  filter(Season == 2012) %>%
+  select(team_mapped, ELO) %>%
+  group_by(team_mapped) %>%
+  summarise(ELO_2012 = last(ELO), .groups = "drop") %>%
+  rename(team = team_mapped)
 
-K <- 40
+team_game_results <- team_game_results %>%
+  left_join(final_elo_2012, by = "team")
 
-for (i in seq(1, nrow(results), by = 2)) {
-  print(i)
+elo_table <- final_elo_2012 %>%
+  filter(!is.na(team)) %>%
+  mutate(current_elo = ELO_2012) %>%
+  select(team, current_elo)
+
+team_game_results <- team_game_results %>%
+  arrange(date)
+
+team_game_results$elo_before <- NA_real_
+team_game_results$elo_after <- NA_real_
+team_game_results$opponent_elo_before <- NA_real_
+team_game_results$opponent_elo_after <- NA_real_
+
+K <- 20
+
+for (i in 1:nrow(team_game_results)) {
   
-  Team_A <- results$TeamPlayedFor[i]
-  Team_B <- results$TeamPlayedFor[i + 1]
+  team <- team_game_results$team[i]
+  opp <- team_game_results$opponent[i]
   
-  Result_A <- results$Result[i]
-  Result_B <- results$Result[i + 1]
-  
-  ELO_A <- teams_elo$ELO[teams_elo$Team == Team_A]
-  ELO_B <- teams_elo$ELO[teams_elo$Team == Team_B]
-  
-  results$ELO[i] <- ELO_A
-  results$OpponentELO[i] <- ELO_B
-  results$ELO[i + 1] <- ELO_B
-  results$OpponentELO[i + 1] <- ELO_A
-  
-  R_A <- 10^(ELO_A / 400)
-  R_B <- 10^(ELO_B / 400)
-  E_A <- R_A / (R_A + R_B)
-  E_B <- R_B / (R_A + R_B)
-  
-  New_ELO_A <- ELO_A + K * (Result_A - E_A)
-  New_ELO_B <- ELO_B + K * (Result_B - E_B)
-  
-  teams_elo$ELO[teams_elo$Team == Team_A] <- New_ELO_A
-  teams_elo$ELO[teams_elo$Team == Team_B] <- New_ELO_B
+  if (team %in% elo_table$team & opp %in% elo_table$team) {
+    
+    elo_team <- elo_table$current_elo[elo_table$team == team]
+    elo_opp  <- elo_table$current_elo[elo_table$team == opp]
+    
+    R_team <- 10^(elo_team / 400)
+    R_opp  <- 10^(elo_opp / 400)
+    
+    E_team <- R_team / (R_team + R_opp)
+    E_opp  <- R_opp / (R_team + R_opp)
+    
+    result_team <- team_game_results$result[i]
+    result_opp <- 1 - result_team  # Opponent's result is complementary
+    
+    new_elo_team <- elo_team + K * (result_team - E_team)
+    new_elo_opp  <- elo_opp  + K * (result_opp  - E_opp)
+    
+    team_game_results$elo_before[i] <- elo_team
+    team_game_results$elo_after[i]  <- new_elo_team
+    team_game_results$opponent_elo_before[i] <- elo_opp
+    team_game_results$opponent_elo_after[i]  <- new_elo_opp
+    
+    elo_table$current_elo[elo_table$team == team] <- new_elo_team
+    elo_table$current_elo[elo_table$team == opp]  <- new_elo_opp
+  }
 }
 
-results <- results %>%
-  mutate(Elo_Difference = ELO - OpponentELO)
+final_results <- team_game_results %>%
+  mutate(Elo_Difference = elo_before - opponent_elo_before)
+
+final_results <- final_results %>%
+  mutate(Home = ifelse(team == home_team, 1, 0))
+
+final_results <- final_results %>%
+  filter(result %in% c(0, 1)) %>%  # Drop draws
+  mutate(
+    Home = ifelse(is_home == 1, 1, 0)  
+  )
+
 #####################################################
-results <- results%>%
-  mutate(Result_Binary = Result) 
-results <- results %>% filter(Result_Binary != 0.5)
+# Add features here
 
-colSums(is.na(results))
-results <- na.omit(results)
+#####################################################
 
-elo_model <- glm(
-  Result_Binary ~ 
-    Elo_Difference + HomeOrAway +
-    SignificantVenue +
-    IsInterstateTeam + IsBigGameDay,   
-  family = binomial,
-  data = results
+# Run Logistic Regression Model 
+
+win_prob_glm_1 <- glm(
+  result ~ Elo_Difference + Home, 
+  data = final_results
 )
 
-summary(elo_model)
-#####################################################
-# Add form eventually and also team averages, consecutive wins and losses, travel distance, primetime or not game,
-# round number, season averages, player strength through brownlow votes or games etc, ELO changes over last 5 games,
-# weather wetweather 1 or 0, interaction terms 
-#####################################################
-results$Predicted_Prob <- predict(elo_model, type = "response")
+summary(win_prob_glm_1)
 
-results <- results %>%
-  mutate(GLM_Forecast = ifelse(Predicted_Prob > 0.5, 1, 0),
-         GLM_Correct = ifelse(GLM_Forecast == Result_Binary, 1, 0))
+## Test Model
 
-mean(results$GLM_Correct, na.rm = TRUE) * 100
-#####################################################
-results_2025 <- results %>% filter(Season == 2025)
+final_results$Win_Prob_Pred <- predict(win_prob_glm_1, type = "response")
+
+# Accuracy of the model
+final_results <- final_results %>%
+  mutate(GLM_Forecast = ifelse(Win_Prob_Pred > 0.5, 1, 0),
+         GLM_Correct = ifelse(GLM_Forecast == result, 1, 0))
+
+glm_accuracy <- mean(final_results$GLM_Correct, na.rm = TRUE)
+glm_accuracy * 100
+
+## Filter for 2025
+
+results_2025 <- final_results %>% filter(season == 2025)
 
 # Accuracy of the model
 results_2025 <- results_2025 %>%
-  mutate(GLM_Forecast = ifelse(Predicted_Prob > 0.5, 1, 0),
-         GLM_Correct = ifelse(GLM_Forecast == Result_Binary, 1, 0))
+  mutate(GLM_Forecast = ifelse(Win_Prob_Pred > 0.5, 1, 0),
+         GLM_Correct = ifelse(GLM_Forecast == result, 1, 0))
 
 glm_accuracy_2025 <- mean(results_2025$GLM_Correct, na.rm = TRUE)
 glm_accuracy_2025 * 100
-#####################################################
 
+# Ladder creation
+# ACTUAL ladder
 ladder_actual <- results_2025 %>%
-  group_by(TeamPlayedFor) %>%
+  group_by(team) %>%
   summarise(
     Games = n(),
-    Wins_Actual = sum(Result == 1),
-    Losses_Actual = sum(Result == 0),
-    Draws_Actual = sum(Result == 0.5),
-    WinPct_Actual = round(mean(Result) * 100, 1),
+    Wins_Actual = sum(result == 1),
+    Losses_Actual = sum(result == 0),
+    Draws_Actual = sum(result == 0.5),
+    WinPct_Actual = round(mean(result) * 100, 1),
     Points_Actual = Wins_Actual * 4 + Draws_Actual * 2,
-    Points_For = sum(TeamScore),
-    Points_Against = sum(OpponentScore),
-    Percentage_Actual = round((Points_For / Points_Against) * 100, 1)
   )
 
+# PREDICTED ladder
 ladder_predicted <- results_2025 %>%
-  group_by(TeamPlayedFor) %>%
+  group_by(team) %>%
   summarise(
     Wins_Pred = sum(GLM_Forecast == 1),
     Losses_Pred = sum(GLM_Forecast == 0),
-    WinPct_Pred = round(mean(GLM_Forecast) * 100, 1),
-    Points_Pred = Wins_Pred * 4,
-    Percentage_Pred = round((sum(TeamScore) / sum(OpponentScore)) * 100, 1)
+    Draws_Pred = sum(Win_Prob_Pred > 0.45 & Win_Prob_Pred < 0.55),  # optional
+    Points_Pred = Wins_Pred * 4 + Draws_Pred * 2,
   )
 
+# Merge both ladders
 ladder_comparison <- ladder_actual %>%
-  left_join(ladder_predicted, by = "TeamPlayedFor") %>%
+  left_join(ladder_predicted, by = "team") %>%
   arrange(desc(Points_Actual))
 
 ladder_comparison <- ladder_comparison %>%
@@ -232,7 +361,6 @@ ladder_comparison <- ladder_comparison %>%
 
 mean(ladder_comparison$Rank_Diff)
 ladder_comparison
-#####################################################
 
 
 
