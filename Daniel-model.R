@@ -1,10 +1,8 @@
-
-# Load libaries
+#####################################################
 library(dplyr) # For data manipulation
 library(fitzRoy) # For AFL data
 library(tidyr)
 #####################################################
-# Fetch data using FitzRoy package functions
 footywire <- fetch_player_stats_footywire(2009:2025)
 footywire <- footywire %>% select(
   Date, Season, Round, Venue, Player, Team, Opposition, Status, Match_id,
@@ -86,9 +84,7 @@ team_game_stats <- player_results_clean %>%
       TeamScore > OpponentScore ~ "Win",
       TeamScore < OpponentScore ~ "Loss",
       TRUE ~ "Draw"
-    ),
-    
-    MatchType = if_else(grepl("EF|QF|SF|PF|GF", Round), "Finals", "Regular Season")
+    )
   )
 
 team_game_stats_numeric <- team_game_stats %>%
@@ -104,13 +100,6 @@ team_game_stats_numeric <- team_game_stats %>%
       HomeOrAway == "Away" ~ 0,
       TRUE ~ NA_real_
     ),
-    MatchType = if_else(MatchType == "Finals", 1, 0),
-    SignificantVenue = case_when(
-      TeamPlayedFor %in% c("Adelaide", "Port Adelaide") & Venue == "Adelaide Oval" ~ 1,
-      TeamPlayedFor == "Geelong" & Venue %in% c("GMHBA Stadium", "Kardinia Park") ~ 1,
-      TeamPlayedFor %in% c("West Coast", "Fremantle") & Venue %in% c("Optus Stadium", "Subiaco Oval") ~ 1,
-      TRUE ~ 0
-    ),
     IsInterstateTeam = if_else(TeamPlayedFor %in% c(
       "West Coast", "Fremantle", "Adelaide", "Port Adelaide",
       "Brisbane", "Gold Coast", "Sydney", "GWS"
@@ -120,7 +109,6 @@ team_game_stats_numeric <- team_game_stats %>%
     OpponentELO = NA_real_
   )
 
-# Creating a teams data frame 
 results <- team_game_stats_numeric
 teams_elo <- unique(c(results$TeamPlayedFor))
 
@@ -131,10 +119,9 @@ teams_elo <- data.frame(
 )
 teams_elo <- teams_elo[order(teams_elo$Team), ]
 #####################################################
-# The creation of ELO
 library(elo)
 
-K <- 20
+K <- 40
 
 for (i in seq(1, nrow(results), by = 2)) {
   print(i)
@@ -165,24 +152,19 @@ for (i in seq(1, nrow(results), by = 2)) {
   teams_elo$ELO[teams_elo$Team == Team_B] <- New_ELO_B
 }
 
-# Add ELO Difference to the data set
 results <- results %>%
   mutate(Elo_Difference = ELO - OpponentELO)
 #####################################################
-# Run Logistic Regression Model 
-# We use logistic regression as it is a classification model, there are two outcomes, win or lose therefore it will output a probability between 0-1. 
-
 results <- results%>%
   mutate(Result_Binary = Result) 
 results <- results %>% filter(Result_Binary != 0.5)
-
 
 colSums(is.na(results))
 results <- na.omit(results)
 
 elo_model <- glm(
   Result_Binary ~ 
-    Elo_Difference + HomeOrAway + MatchType +
+    Elo_Difference + HomeOrAway +
     SignificantVenue +
     IsInterstateTeam + IsBigGameDay,   
   family = binomial,
@@ -195,8 +177,6 @@ summary(elo_model)
 # round number, season averages, player strength through brownlow votes or games etc, ELO changes over last 5 games,
 # weather wetweather 1 or 0, interaction terms 
 #####################################################
-## Test Model
-
 results$Predicted_Prob <- predict(elo_model, type = "response")
 
 results <- results %>%
@@ -205,8 +185,6 @@ results <- results %>%
 
 mean(results$GLM_Correct, na.rm = TRUE) * 100
 #####################################################
-## Predict and filter for 2025
-
 results_2025 <- results %>% filter(Season == 2025)
 
 # Accuracy of the model
@@ -218,8 +196,6 @@ glm_accuracy_2025 <- mean(results_2025$GLM_Correct, na.rm = TRUE)
 glm_accuracy_2025 * 100
 #####################################################
 
-# Ladder creation - my dataset is called results_2025 
-# ACTUAL ladder
 ladder_actual <- results_2025 %>%
   group_by(TeamPlayedFor) %>%
   summarise(
@@ -234,7 +210,6 @@ ladder_actual <- results_2025 %>%
     Percentage_Actual = round((Points_For / Points_Against) * 100, 1)
   )
 
-# PREDICTED ladder
 ladder_predicted <- results_2025 %>%
   group_by(TeamPlayedFor) %>%
   summarise(
@@ -245,7 +220,6 @@ ladder_predicted <- results_2025 %>%
     Percentage_Pred = round((sum(TeamScore) / sum(OpponentScore)) * 100, 1)
   )
 
-# Merge both ladders
 ladder_comparison <- ladder_actual %>%
   left_join(ladder_predicted, by = "TeamPlayedFor") %>%
   arrange(desc(Points_Actual))
