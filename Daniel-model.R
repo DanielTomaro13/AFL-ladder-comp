@@ -351,9 +351,8 @@ win_prob_glm_1 <- glm(
 )
 
 summary(win_prob_glm_1)
-
-## Test Model
-
+#####################################################
+# Test Model
 final_results$Win_Prob_Pred <- predict(win_prob_glm_1, type = "response")
 
 # Accuracy of the model
@@ -363,9 +362,8 @@ final_results <- final_results %>%
 
 glm_accuracy <- mean(final_results$GLM_Correct, na.rm = TRUE)
 glm_accuracy * 100
-
-## Filter for 2025
-
+#####################################################
+# Filter for 2025
 results_2025 <- final_results %>% filter(season == 2025)
 
 # Accuracy of the model
@@ -375,7 +373,7 @@ results_2025 <- results_2025 %>%
 
 glm_accuracy_2025 <- mean(results_2025$GLM_Correct, na.rm = TRUE)
 glm_accuracy_2025 * 100
-
+#####################################################
 # Ladder creation
 # ACTUAL ladder
 ladder_actual <- results_2025 %>%
@@ -408,9 +406,10 @@ ladder_comparison <- ladder_comparison %>%
          Rank_Actual = rank(-Points_Actual),
          Rank_Pred = rank(-Points_Pred),
          Rank_Diff = abs(Rank_Pred - Rank_Actual))
-
+#####################################################
 mean(ladder_comparison$Rank_Diff)
 ladder_comparison
+#####################################################
 
 
 
