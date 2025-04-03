@@ -330,13 +330,156 @@ for (stat in stat_diff_cols) {
 #####################################################
 # Add team form
 
+final_results <- final_results %>%
+  arrange(team, date) %>%
+  group_by(team) %>%
+  mutate(
+    form_last_3 = coalesce(lag(slide_dbl(result, ~mean(.x, na.rm = TRUE), .before = 2, .complete = TRUE)), 0),
+    form_last_5 = coalesce(lag(slide_dbl(result, ~mean(.x, na.rm = TRUE), .before = 4, .complete = TRUE)), 0)
+  ) %>%
+  ungroup()
+#####################################################
+# Add rolling ladder
 
+final_results <- final_results %>%
+  arrange(season, round, date) %>%
+  group_by(season, team) %>%
+  mutate(
+    cumulative_wins = lag(cumsum(result), default = 0),
+    cumulative_points = lag(cumsum(result * 4), default = 0)  # 4 points per win
+  ) %>%
+  ungroup()
+
+final_results <- final_results %>%
+  group_by(season, round) %>%
+  mutate(
+    ladder_position = ifelse(round <= 1, 0, rank(-cumulative_points, ties.method = "min"))
+  ) %>%
+  ungroup()
+
+opponent_ladder <- final_results %>%
+  select(season, round, team, opponent_ladder_position = ladder_position)
+
+final_results <- final_results %>%
+  left_join(opponent_ladder, by = c("season", "round", "opponent" = "team"))
+
+final_results <- final_results %>% mutate(
+  ladder_diff = ladder_position - opponent_ladder_position
+)
+#####################################################
+# Adding weather
+seasons <- 2013:2025
+afl_results_stats_list <- list()
+for (season in seasons) {
+  results <- fetch_results(season = season, source = "AFL", comp = "AFLM")
+  afl_results_stats_list[[as.character(season)]] <- results
+}
+all_cols <- unique(unlist(lapply(afl_results_stats_list, names)))
+afl_results_stats_list <- lapply(afl_results_stats_list, function(df) {
+  missing_cols <- setdiff(all_cols, names(df))
+  df[missing_cols] <- NA
+  return(df[all_cols])
+})
+
+afl_results_stats <- do.call(rbind, afl_results_stats_list)
+afl_results_stats <- afl_results_stats %>% 
+  mutate(
+    date = as.Date(match.date),
+    season =year(date)
+  )
+colnames(afl_results_stats)
+
+weather_info <- afl_results_stats %>%
+  mutate(
+    date = as.Date(match.date),
+    season = year(date),
+    round = round.roundNumber,
+    home_team = match.homeTeam.name,
+    away_team = match.awayTeam.name,
+    game_id = paste0(season, "_", round, "_", pmin(home_team, away_team), "_vs_", pmax(home_team, away_team))
+  ) %>%
+  select(game_id, weather_type = weather.weatherType)
+
+final_results <- final_results %>%
+  left_join(weather_info, by = "game_id")
+
+final_results <- final_results %>%
+  mutate(
+    is_bad_weather = case_when(
+      grepl("Rain", weather_type, ignore.case = TRUE) ~ 1,
+      grepl("Wind", weather_type, ignore.case = TRUE) ~ 1,
+      TRUE ~ 0
+    )
+  )
+#####################################################
+# Adding Venue instead of home
+
+home_grounds <- list(
+  "Adelaide Crows" = c("Adelaide Oval"),
+  "Port Adelaide" = c("Adelaide Oval"),
+  "Brisbane Lions" = c("Gabba"),
+  "Carlton" = c("MCG", "Marvel Stadium"),
+  "Collingwood" = c("MCG"),
+  "Essendon" = c("MCG", "Marvel Stadium"),
+  "Fremantle" = c("Optus Stadium"),
+  "Geelong Cats" = c("GMHBA Stadium"),
+  "Gold Coast SUNS" = c("People First Stadium"),
+  "GWS GIANTS" = c("ENGIE Stadium", "Manuka Oval"),
+  "Hawthorn" = c("MCG", "University of Tasmania Stadium", "Marvel Stadium"),
+  "Melbourne" = c("MCG"),
+  "North Melbourne" = c("Marvel Stadium", "Blundstone Arena"),
+  "Richmond" = c("MCG"),
+  "St Kilda" = c("Marvel Stadium"),
+  "Sydney Swans" = c("SCG"),
+  "West Coast Eagles" = c("Optus Stadium"),
+  "Western Bulldogs" = c("Marvel Stadium")
+)
+final_results <- final_results %>%
+  rowwise() %>%
+  mutate(
+    home_advantage_score = case_when(
+      venue %in% home_grounds[[team]] ~ 1,                    # True home
+      venue %in% home_grounds[[opponent]] ~ -1,               # True away
+      TRUE ~ 0                                                # Neutral/unknown
+    )
+  ) %>%
+  ungroup()
+#####################################################
+# Adding rest days in between matches and short turn around
+final_results <- final_results %>%
+  arrange(team, date) %>%
+  group_by(team) %>%
+  mutate(
+    rest_days = as.numeric(date - lag(date)),
+    rest_days = ifelse(is.na(rest_days), 7, rest_days)  # Assume 7 days for first match
+  ) %>%
+  ungroup()
+
+final_results <- final_results %>%
+  mutate(
+    short_turnaround = ifelse(rest_days < 6, 1, 0)
+  )
+
+opponent_rest <- final_results %>%
+  select(date, team, rest_days) %>%
+  rename(opponent = team, opponent_rest_days = rest_days)
+
+final_results <- final_results %>%
+  left_join(opponent_rest, by = c("date", "opponent")) %>%
+  mutate(rest_diff = rest_days - opponent_rest_days)
+#####################################################
+# Adding is_final
+
+final_results <- final_results %>%
+  mutate(
+    is_final = ifelse(round > 24, 1, 0)
+  )
 #####################################################
 
 # Run Logistic Regression Model 
 
 win_prob_glm_1 <- glm(
-  result ~ Elo_Difference + Home +
+  result ~ Elo_Difference + home_advantage_score +
     diff_tackles +
     diff_pressure_acts +
     diff_tackles_inside50 +
@@ -345,13 +488,29 @@ win_prob_glm_1 <- glm(
     diff_inside50s +
     diff_intercepts +
     diff_contested_ratio +
-    diff_kick_to_handball_ratio,
+    diff_kick_to_handball_ratio +
+    form_last_5 +
+    ladder_diff +
+    is_bad_weather +
+    rest_days +
+    short_turnaround +
+    is_final,
   data = final_results,
   family = "binomial"
 )
 
 summary(win_prob_glm_1)
 #####################################################
+# Selecting only significant variables
+win_prob_glm_1 <- step(win_prob_glm_1, direction = "both", trace = FALSE)
+summary(win_prob_glm_1)
+#####################################################
+# Calculating area under the curve
+library(pROC)
+roc_full <- roc(final_results$result, final_results$Win_Prob_Pred)
+auc(roc_full)  # Area Under Curve
+#####################################################
+
 # Test Model
 final_results$Win_Prob_Pred <- predict(win_prob_glm_1, type = "response")
 
@@ -362,6 +521,19 @@ final_results <- final_results %>%
 
 glm_accuracy <- mean(final_results$GLM_Correct, na.rm = TRUE)
 glm_accuracy * 100
+#####################################################
+# Finding the best threshold
+
+thresholds <- seq(0.3, 0.7, by = 0.01)
+acc_by_thresh <- sapply(thresholds, function(t) {
+  forecast <- ifelse(final_results$Win_Prob_Pred > t, 1, 0)
+  mean(forecast == final_results$result, na.rm = TRUE)
+})
+
+best_thresh <- thresholds[which.max(acc_by_thresh)]
+best_thresh
+max(acc_by_thresh) * 100
+
 #####################################################
 # Filter for 2025
 results_2025 <- final_results %>% filter(season == 2025)
@@ -392,8 +564,7 @@ ladder_predicted <- results_2025 %>%
   summarise(
     Wins_Pred = sum(GLM_Forecast == 1),
     Losses_Pred = sum(GLM_Forecast == 0),
-    Draws_Pred = sum(Win_Prob_Pred > 0.45 & Win_Prob_Pred < 0.55),  # optional
-    Points_Pred = Wins_Pred * 4 + Draws_Pred * 2,
+    Points_Pred = Wins_Pred * 4,
   )
 
 # Merge both ladders
