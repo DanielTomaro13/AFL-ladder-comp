@@ -535,6 +535,7 @@ best_thresh
 max(acc_by_thresh) * 100
 
 #####################################################
+# Ladder creation for GLM model
 # Filter for 2025
 results_2025 <- final_results %>% filter(season == 2025)
 
@@ -581,15 +582,104 @@ ladder_comparison <- ladder_comparison %>%
 mean(ladder_comparison$Rank_Diff)
 ladder_comparison
 #####################################################
+# Adding some indicators for margin
+
+final_results <- final_results %>%
+  arrange(team, date) %>%
+  group_by(team) %>%
+  mutate(
+    avg_totalpoints = lag(cummean(totalpoints)),
+    avg_margin = lag(cummean(game_margin))
+  ) %>%
+  ungroup()
+
+opponent_pts_avgs <- final_results %>%
+  select(date, team, avg_totalpoints, avg_margin) %>%
+  rename(opponent = team) %>%
+  rename_with(~ paste0("opp_", .), starts_with("avg_"))
+
+final_results <- final_results %>%
+  left_join(opponent_pts_avgs, by = c("date", "opponent")) %>%
+  mutate(
+    diff_avg_totalpoints = avg_totalpoints - opp_avg_totalpoints,
+    diff_avg_margin = avg_margin - opp_avg_margin
+  )
+#####################################################
+# Linear Regression - calculates margin
+
+margin_model <- lm(
+  margin ~ Elo_Difference + home_advantage_score +
+    diff_tackles + diff_pressure_acts + diff_tackles_inside50 +
+    diff_ground_ball_gets + diff_contested_possessions +
+    diff_inside50s + diff_intercepts + diff_contested_ratio +
+    diff_kick_to_handball_ratio + form_last_5 +
+    ladder_diff + is_bad_weather + rest_days +
+    short_turnaround + is_final + diff_avg_totalpoints + diff_avg_margin,
+  data = final_results
+)
+
+summary(margin_model)
+#####################################################
+# Testing model
+
+results_2025 <- final_results %>%
+  filter(season == 2025) %>%
+  mutate(
+  Margin_Pred = predict(margin_model, newdata = .)
+  )
+
+results_2025 <- results_2025 %>%
+  mutate(Margin_Pred_Result = ifelse(Margin_Pred > 0, 1, 0))
+
+results_2025 <- results_2025 %>%
+  mutate(Margin_Pred_Correct = ifelse(Margin_Pred_Result == result, 1, 0))
+
+margin_model_accuracy <- mean(results_2025$Margin_Pred_Correct, na.rm = TRUE) * 100
+margin_model_accuracy
+mae_margin_2025 <- mean(abs(results_2025$margin - results_2025$Margin_Pred), na.rm = TRUE)
+mae_margin_2025
+
+set.seed(123)
+results_2025 <- results_2025 %>%
+  mutate(
+    Simulated_Margin = rnorm(n(), mean = Margin_Pred, sd = sd(margin_model$residuals, na.rm = TRUE)),
+    Simulated_Result = ifelse(Simulated_Margin > 0, 1, 0)
+  )
+results_2025 <- results_2025 %>% select(date, team, opponent, Simulated_Margin, Simulated_Result)
+#####################################################
+# Ladder creation for margin model
+ladder_actual <- final_results %>%
+  filter(season == 2025) %>%
+  group_by(team) %>%
+  summarise(
+    Games = n(),
+    Actual_Wins = sum(result == 1),
+    Actual_Losses = sum(result == 0),
+    Actual_Draws = sum(result == 0.5),
+    Actual_Points = Actual_Wins * 4 + Actual_Draws * 2
+  ) %>%
+  arrange(desc(Actual_Points)) %>%
+  mutate(Actual_Rank = rank(-Actual_Points, ties.method = "min"))
 
 
+ladder_simulated <- results_2025 %>%
+  group_by(team) %>%
+  summarise(
+    Games = n(),
+    Sim_Wins = sum(Simulated_Result == 1),
+    Sim_Losses = sum(Simulated_Result == 0),
+    Sim_Points = Sim_Wins * 4 
+  ) %>%
+  arrange(desc(Sim_Points)) %>%
+  mutate(Sim_Rank = rank(-Sim_Points, ties.method = "min"))
 
+ladder_comparison <- ladder_simulated %>%
+  left_join(ladder_actual, by = "team") %>%
+  mutate(
+    Point_Diff = Sim_Points - Actual_Points,
+    Rank_Diff = abs(Sim_Rank - Actual_Rank)
+  ) %>%
+  arrange(Actual_Rank)
 
-
-
-
-
-
-
-
-
+mean(ladder_comparison$Rank_Diff)
+#####################################################
