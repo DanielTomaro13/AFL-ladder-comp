@@ -1,6 +1,7 @@
 ## Step by Step AFL model
 
 # Load libaries
+library(tidyr)
 library(dplyr) # For data manipulation
 library(ggplot2) # Optional - for graphical visualisation
 library(fitzRoy) # For AFL data
@@ -21,7 +22,8 @@ colnames(squiggle)
 
 # I have chosen to go with AFL tables due to its speed and history
 results <- fetch_results_afltables(1897:2025)
-
+colSums(is.na(results))
+str(results)
 # Function to restructure data so each game has two entries one for home and one for away
 restructure_afl_data <- function(afl_data) {
   # Home team perspective
@@ -67,6 +69,7 @@ results <- restructure_afl_data(results)
 colnames(results)
 # So we can see we have added ELO, boolean values for if the row is related to the home or away team and a boolean result column in the form of W and L
 # Let us make everything numeric and get rid of NA for ELO
+
 results <- results %>% mutate(
   ELO = 0,
   Opp_ELO = 0,

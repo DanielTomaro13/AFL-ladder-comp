@@ -505,12 +505,6 @@ summary(win_prob_glm_1)
 win_prob_glm_1 <- step(win_prob_glm_1, direction = "both", trace = FALSE)
 summary(win_prob_glm_1)
 #####################################################
-# Calculating area under the curve
-library(pROC)
-roc_full <- roc(final_results$result, final_results$Win_Prob_Pred)
-auc(roc_full)  # Area Under Curve
-#####################################################
-
 # Test Model
 final_results$Win_Prob_Pred <- predict(win_prob_glm_1, type = "response")
 
@@ -521,6 +515,11 @@ final_results <- final_results %>%
 
 glm_accuracy <- mean(final_results$GLM_Correct, na.rm = TRUE)
 glm_accuracy * 100
+#####################################################
+# Calculating area under the curve
+library(pROC)
+roc_full <- roc(final_results$result, final_results$Win_Prob_Pred)
+auc(roc_full)  # Area Under Curve
 #####################################################
 # Finding the best threshold
 
@@ -588,8 +587,8 @@ final_results <- final_results %>%
   arrange(team, date) %>%
   group_by(team) %>%
   mutate(
-    avg_totalpoints = lag(cummean(totalpoints)),
-    avg_margin = lag(cummean(game_margin))
+    avg_totalpoints = lag(cummean(total_score)),
+    avg_margin = lag(cummean(margin))
   ) %>%
   ungroup()
 
@@ -683,3 +682,755 @@ ladder_comparison <- ladder_simulated %>%
 
 mean(ladder_comparison$Rank_Diff)
 #####################################################
+fixture_2025 <- fetch_fixture(season = 2025, source = "AFL", comp = "AFLM")
+
+process_fixture <- function(fixture) {
+  fixture_processed <- fixture %>%
+    mutate(
+      date = as.Date(utcStartTime),
+      season = year(date),
+      round = round.roundNumber,
+      home_team = home.team.name,
+      away_team = away.team.name,
+      venue = venue.name,
+      game_id = paste0(season, "_", round, "_", pmin(home_team, away_team), "_vs_", pmax(home_team, away_team))
+    ) %>%
+    select(date, season, round, venue, game_id, home_team, away_team)
+  
+  # Create home team entries
+  home_entries <- fixture_processed %>%
+    mutate(
+      team = home_team,
+      opponent = away_team,
+      Home = 1
+    )
+  
+  # Create away team entries
+  away_entries <- fixture_processed %>%
+    mutate(
+      team = away_team,
+      opponent = home_team,
+      Home = 0
+    )
+  
+  # Combine both entries
+  bind_rows(home_entries, away_entries) %>%
+    arrange(date, game_id)
+}
+
+# Process the 2025 fixture
+fixture_processed <- process_fixture(fixture_2025)
+#####################################################
+elo_table_current <- final_results %>%
+  filter(season == 2024) %>%
+  group_by(team) %>%
+  filter(round == max(round)) %>%
+  summarise(current_elo = last(elo_after), .groups = "drop")
+#####################################################
+# Add team statistics from the end of 2024
+team_stats_end_2024 <- final_results %>%
+  filter(season == 2024) %>%
+  group_by(team) %>%
+  filter(round == max(round)) %>%
+  select(team, all_of(paste0("avg_", team_stats_cols)), form_last_3, form_last_5, 
+         avg_totalpoints, avg_margin) %>%
+  distinct()
+#####################################################
+# Add last ladder position from 2024
+ladder_2024 <- final_results %>%
+  filter(season == 2024) %>%
+  group_by(team) %>%
+  filter(round == 24) %>%
+  select(team, ladder_position) %>%
+  distinct()
+#####################################################
+stat_diff_cols <- c(
+  "avg_tackles", "avg_pressure_acts", "avg_tackles_inside50",
+  "avg_ground_ball_gets", "avg_contested_possessions", "avg_inside50s",
+  "avg_intercepts", "avg_contested_ratio", "avg_kick_to_handball_ratio"
+)
+
+fixture_with_features <- fixture_processed %>%
+  # Add ELO ratings
+  left_join(elo_table_current, by = "team") %>%
+  left_join(elo_table_current %>% rename(opponent = team, opponent_elo = current_elo), 
+            by = "opponent") %>%
+  mutate(Elo_Difference = current_elo - opponent_elo) %>%
+  # Add team stats
+  left_join(team_stats_end_2024, by = "team") %>%
+  left_join(team_stats_end_2024 %>% 
+              rename_with(~ paste0("opp_", .), -team) %>%
+              rename(opponent = team), 
+            by = "opponent") %>%
+  # Calculate stat differences
+  mutate(
+    across(
+      all_of(stat_diff_cols),
+      ~ .x - get(paste0("opp_", cur_column())),
+      .names = "diff_{.col}"
+    )
+  ) %>% 
+rowwise() %>%
+  mutate(
+    home_advantage_score = case_when(
+      venue %in% home_grounds[[team]] ~ 1,               # True home
+      venue %in% home_grounds[[opponent]] ~ -1,          # True away
+      TRUE ~ 0                                           # Neutral
+    )
+  ) %>%
+  ungroup() %>%
+  # Add ladder difference
+  left_join(ladder_2024, by = "team") %>%
+  left_join(ladder_2024 %>% rename(opponent = team, opponent_ladder_position = ladder_position), 
+            by = "opponent") %>%
+  mutate(ladder_diff = ladder_position - opponent_ladder_position) %>%
+  # Add other features
+  mutate(
+    is_final = ifelse(as.numeric(round) > 24, 1, 0),
+    is_bad_weather = 0,  # Can't predict weather, assume neutral
+    short_turnaround = 0 # Starting assumption
+  )
+fixture_with_features <- fixture_with_features %>%
+  rename_with(~ gsub("^diff_avg_", "diff_", .), starts_with("diff_avg_"))
+#####################################################
+# Make predictions using the GLM model
+win_prob_glm_1 <- glm(
+  result ~ Elo_Difference + home_advantage_score +
+    ladder_diff,
+  data = final_results,
+  family = "binomial"
+)
+
+summary(win_prob_glm_1)
+fixture_with_features$Win_Prob_Pred <- predict(win_prob_glm_1, 
+                                               newdata = fixture_with_features, 
+                                               type = "response")
+#####################################################
+# Make predictions using the margin model
+margin_model <- lm(
+  result ~ Elo_Difference + home_advantage_score +
+    diff_tackles +
+    ladder_diff,   
+    data = final_results
+)
+summary(margin_model)
+fixture_with_features$Margin_Pred <- predict(margin_model, 
+                                             newdata = fixture_with_features)
+#####################################################
+set.seed(2025)
+
+fixture_with_features <- fixture_with_features %>%
+  mutate(
+    Simulated_Result = rbinom(n(), size = 1, prob = Win_Prob_Pred),  # 1 = team wins, 0 = opponent wins
+    Sim_Winner = ifelse(Simulated_Result == 1, team, opponent),
+    Sim_Loser = ifelse(Simulated_Result == 0, team, opponent)
+  ) %>%
+  group_by(game_id) %>%
+  slice(1) %>%
+  ungroup()
+
+fixture_long <- fixture_with_features %>%
+  filter(round < 25) %>%  # regular season only
+  select(game_id, Sim_Winner, Sim_Loser) %>%
+  pivot_longer(cols = c(Sim_Winner, Sim_Loser), names_to = "result_type", values_to = "team") %>%
+  mutate(
+    Sim_Win = ifelse(result_type == "Sim_Winner", 1, 0)
+  )
+#####################################################
+ladder_prediction <- fixture_long %>%
+  group_by(team) %>%
+  summarise(
+    Games = n(),
+    Sim_Wins = sum(Sim_Win),
+    Sim_Losses = Games - Sim_Wins,
+    Sim_Points = Sim_Wins * 4,
+  ) %>%
+  arrange(desc(Sim_Points)) %>%
+  mutate(Position = row_number())
+#####################################################
+# Simulate finals
+simulate_finals <- function(ladder) {
+  # Get top 8 teams
+  finals_teams <- ladder_prediction %>%
+    filter(Position <= 8) %>%
+    select(team, Position)
+  
+  # Qualifying Finals: 1v4, 2v3
+  qf1 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 1],
+    opponent = finals_teams$team[finals_teams$Position == 4],
+    round = "QF1",
+    home_advantage = 1
+  )
+  
+  qf2 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 2],
+    opponent = finals_teams$team[finals_teams$Position == 3],
+    round = "QF2",
+    home_advantage = 1
+  )
+  
+  # Elimination Finals: 5v8, 6v7
+  ef1 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 5],
+    opponent = finals_teams$team[finals_teams$Position == 8],
+    round = "EF1",
+    home_advantage = 1
+  )
+  
+  ef2 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 6],
+    opponent = finals_teams$team[finals_teams$Position == 7],
+    round = "EF2",
+    home_advantage = 1
+  )
+  
+  # Create all first-round finals matchups
+  finals_round1 <- bind_rows(qf1, qf2, ef1, ef2)
+  
+  # Predict results using our models
+  finals_round1 <- finals_round1 %>%
+    left_join(elo_table_current, by = "team") %>%
+    left_join(elo_table_current %>% rename(opponent = team, opponent_elo = current_elo), 
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      # Add other required predictors with reasonable values
+      diff_contested_possessions = 0,
+      form_last_5 = 0.6,  # Assume teams in finals have good form
+      ladder_diff = 0,    # Will be calculated
+      is_bad_weather = 0,
+      rest_days = 7,
+      is_final = 1
+    )
+  
+  # Add ladder positions
+  finals_round1 <- finals_round1 %>%
+    left_join(finals_teams %>% select(team, Position), by = "team") %>%
+    left_join(finals_teams %>% select(team, Position) %>% rename(opponent = team, opponent_Position = Position), 
+              by = "opponent") %>%
+    mutate(ladder_diff = Position - opponent_Position)
+  
+  # Make predictions
+  finals_round1$Win_Prob = predict(win_prob_glm_1, newdata = finals_round1, type = "response")
+  
+  # Simulate results
+  set.seed(2025)
+  finals_round1 <- finals_round1 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+#####################################################
+  # Second round of finals
+  sf1 <- data.frame(
+    team = finals_round1$loser[finals_round1$round == "QF1"],
+    opponent = finals_round1$winner[finals_round1$round == "EF1"],
+    round = "SF1",
+    home_advantage = 1
+  )
+  
+  sf2 <- data.frame(
+    team = finals_round1$loser[finals_round1$round == "QF2"],
+    opponent = finals_round1$winner[finals_round1$round == "EF2"],
+    round = "SF2",
+    home_advantage = 1
+  )
+  
+  finals_round2 <- bind_rows(sf1, sf2)
+  
+  # Predict second round results
+  finals_round2 <- finals_round2 %>%
+    left_join(elo_table_current, by = "team") %>%
+    left_join(elo_table_current %>% rename(opponent = team, opponent_elo = current_elo), 
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      diff_contested_possessions = 0,
+      form_last_5 = 0.6,
+      ladder_diff = 0,
+      is_bad_weather = 0,
+      rest_days = 7,
+      is_final = 1
+    )
+  
+  finals_round2$Win_Prob = predict(win_prob_glm_1, newdata = finals_round2, type = "response")
+  
+  # Simulate results
+  set.seed(2026)
+  finals_round2 <- finals_round2 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+#####################################################
+  # Preliminary Finals
+  pf1 <- data.frame(
+    team = finals_round1$winner[finals_round1$round == "QF1"],
+    opponent = finals_round2$winner[finals_round2$round == "SF1"],
+    round = "PF1",
+    home_advantage = 1
+  )
+  
+  pf2 <- data.frame(
+    team = finals_round1$winner[finals_round1$round == "QF2"],
+    opponent = finals_round2$winner[finals_round2$round == "SF2"],
+    round = "PF2",
+    home_advantage = 1
+  )
+  
+  finals_round3 <- bind_rows(pf1, pf2)
+  
+  # Predict third round results
+  finals_round3 <- finals_round3 %>%
+    left_join(elo_table_current, by = "team") %>%
+    left_join(elo_table_current %>% rename(opponent = team, opponent_elo = current_elo), 
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      diff_contested_possessions = 0,
+      form_last_5 = 0.7,
+      ladder_diff = 0,
+      is_bad_weather = 0,
+      rest_days = 7,
+      is_final = 1
+    )
+  
+  finals_round3$Win_Prob = predict(win_prob_glm_1, newdata = finals_round3, type = "response")
+  
+  # Simulate results
+  set.seed(2027)
+  finals_round3 <- finals_round3 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+#####################################################
+  # Grand Final
+  gf <- data.frame(
+    team = finals_round3$winner[finals_round3$round == "PF1"],
+    opponent = finals_round3$winner[finals_round3$round == "PF2"],
+    round = "GF",
+    home_advantage = 0  # Neutral venue
+  )
+  
+  # Predict Grand Final result
+  gf <- gf %>%
+    left_join(elo_table_current, by = "team") %>%
+    left_join(elo_table_current %>% rename(opponent = team, opponent_elo = current_elo), 
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      diff_contested_possessions = 0,
+      form_last_5 = 0.8,
+      ladder_diff = 0,
+      is_bad_weather = 0,
+      rest_days = 14,  # Two weeks break
+      is_final = 1
+    )
+  
+  gf$Win_Prob = predict(win_prob_glm_1, newdata = gf, type = "response")
+  
+  # Simulate Grand Final result
+  set.seed(2028)
+  gf <- gf %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+#####################################################
+  # Compile all finals results
+  all_finals <- bind_rows(
+    finals_round1 %>% mutate(stage = "Week 1"),
+    finals_round2 %>% mutate(stage = "Week 2"),
+    finals_round3 %>% mutate(stage = "Week 3"),
+    gf %>% mutate(stage = "Grand Final")
+  )
+  
+  # Return finals results and premier
+  list(
+    all_finals = all_finals,
+    premier = gf$winner
+  )
+}
+#####################################################
+# Simulate the finals
+finals_results <- simulate_finals(ladder_prediction)
+#####################################################
+# Function to simulate a single season
+simulate_single_season <- function(fixture_data, elo_table, win_model, seed_value = NULL) {
+  if (!is.null(seed_value)) {
+    set.seed(seed_value)
+  }
+  
+  # Create a copy of the fixture to work with
+  fixture_sim <- fixture_data %>%
+    mutate(
+      Simulated_Result = rbinom(n(), size = 1, prob = Win_Prob_Pred),  # 1 = team wins, 0 = opponent wins
+      Sim_Winner = ifelse(Simulated_Result == 1, team, opponent),
+      Sim_Loser = ifelse(Simulated_Result == 0, team, opponent)
+    ) %>%
+    group_by(game_id) %>%
+    slice(1) %>%
+    ungroup()
+  
+  # Create ladder from simulated results
+  fixture_long <- fixture_sim %>%
+    filter(round < 25) %>%  # regular season only
+    select(game_id, Sim_Winner, Sim_Loser) %>%
+    pivot_longer(cols = c(Sim_Winner, Sim_Loser), names_to = "result_type", values_to = "team") %>%
+    mutate(Sim_Win = ifelse(result_type == "Sim_Winner", 1, 0))
+  
+  ladder_sim <- fixture_long %>%
+    group_by(team) %>%
+    summarise(
+      Games = n(),
+      Sim_Wins = sum(Sim_Win),
+      Sim_Losses = Games - Sim_Wins,
+      Sim_Points = Sim_Wins * 4,
+    ) %>%
+    arrange(desc(Sim_Points)) %>%
+    mutate(Position = row_number())
+  
+  # Simulate finals
+  finals_result <- simulate_finals(ladder_sim, elo_table, win_model)
+  
+  # Return results
+  return(list(
+    ladder = ladder_sim,
+    premier = finals_result$premier,
+    grand_finalist = finals_result$grand_finalist,
+    finals_teams = ladder_sim %>% filter(Position <= 8) %>% pull(team)
+  ))
+}
+#####################################################
+# Modified finals simulation function to work with our multi-simulation approach
+simulate_finals <- function(ladder, elo_table, win_model) {
+  # Get top 8 teams
+  finals_teams <- ladder %>%
+    filter(Position <= 8) %>%
+    select(team, Position)
+  
+  # Qualifying Finals: 1v4, 2v3
+  qf1 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 1],
+    opponent = finals_teams$team[finals_teams$Position == 4],
+    round = "QF1",
+    home_advantage = 1
+  )
+  
+  qf2 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 2],
+    opponent = finals_teams$team[finals_teams$Position == 3],
+    round = "QF2",
+    home_advantage = 1
+  )
+  
+  # Elimination Finals: 5v8, 6v7
+  ef1 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 5],
+    opponent = finals_teams$team[finals_teams$Position == 8],
+    round = "EF1",
+    home_advantage = 1
+  )
+  
+  ef2 <- data.frame(
+    team = finals_teams$team[finals_teams$Position == 6],
+    opponent = finals_teams$team[finals_teams$Position == 7],
+    round = "EF2",
+    home_advantage = 1
+  )
+  
+  # Create all first-round finals matchups
+  finals_round1 <- bind_rows(qf1, qf2, ef1, ef2)
+  
+  # Predict results using our models
+  finals_round1 <- finals_round1 %>%
+    left_join(elo_table %>% select(team, current_elo), by = "team") %>%
+    left_join(elo_table %>% select(team, current_elo) %>% 
+                rename(opponent = team, opponent_elo = current_elo),
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      ladder_diff = 0  # Will be calculated
+    )
+  
+  # Add ladder positions
+  finals_round1 <- finals_round1 %>%
+    left_join(finals_teams %>% select(team, Position), by = "team") %>%
+    left_join(finals_teams %>% select(team, Position) %>% 
+                rename(opponent = team, opponent_Position = Position),
+              by = "opponent") %>%
+    mutate(ladder_diff = Position - opponent_Position)
+  
+  # Make predictions
+  finals_round1$Win_Prob = predict(win_model, newdata = finals_round1, type = "response")
+  
+  # Simulate results
+  finals_round1 <- finals_round1 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+  
+  # Second round of finals
+  sf1 <- data.frame(
+    team = finals_round1$loser[finals_round1$round == "QF1"],
+    opponent = finals_round1$winner[finals_round1$round == "EF1"],
+    round = "SF1",
+    home_advantage = 1
+  )
+  
+  sf2 <- data.frame(
+    team = finals_round1$loser[finals_round1$round == "QF2"],
+    opponent = finals_round1$winner[finals_round1$round == "EF2"],
+    round = "SF2",
+    home_advantage = 1
+  )
+  
+  finals_round2 <- bind_rows(sf1, sf2)
+  
+  # Predict second round results
+  finals_round2 <- finals_round2 %>%
+    left_join(elo_table %>% select(team, current_elo), by = "team") %>%
+    left_join(elo_table %>% select(team, current_elo) %>% 
+                rename(opponent = team, opponent_elo = current_elo),
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      ladder_diff = 0
+    )
+  
+  finals_round2$Win_Prob = predict(win_model, newdata = finals_round2, type = "response")
+  
+  # Simulate results
+  finals_round2 <- finals_round2 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+  
+  # Preliminary Finals
+  pf1 <- data.frame(
+    team = finals_round1$winner[finals_round1$round == "QF1"],
+    opponent = finals_round2$winner[finals_round2$round == "SF1"],
+    round = "PF1",
+    home_advantage = 1
+  )
+  
+  pf2 <- data.frame(
+    team = finals_round1$winner[finals_round1$round == "QF2"],
+    opponent = finals_round2$winner[finals_round2$round == "SF2"],
+    round = "PF2",
+    home_advantage = 1
+  )
+  
+  finals_round3 <- bind_rows(pf1, pf2)
+  
+  # Predict third round results
+  finals_round3 <- finals_round3 %>%
+    left_join(elo_table %>% select(team, current_elo), by = "team") %>%
+    left_join(elo_table %>% select(team, current_elo) %>% 
+                rename(opponent = team, opponent_elo = current_elo),
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      ladder_diff = 0
+    )
+  
+  finals_round3$Win_Prob = predict(win_model, newdata = finals_round3, type = "response")
+  
+  # Simulate results
+  finals_round3 <- finals_round3 %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+  
+  # Grand Final
+  gf <- data.frame(
+    team = finals_round3$winner[finals_round3$round == "PF1"],
+    opponent = finals_round3$winner[finals_round3$round == "PF2"],
+    round = "GF",
+    home_advantage = 0  # Neutral venue
+  )
+  
+  # Predict Grand Final result
+  gf <- gf %>%
+    left_join(elo_table %>% select(team, current_elo), by = "team") %>%
+    left_join(elo_table %>% select(team, current_elo) %>% 
+                rename(opponent = team, opponent_elo = current_elo),
+              by = "opponent") %>%
+    mutate(
+      Elo_Difference = current_elo - opponent_elo,
+      home_advantage_score = home_advantage,
+      ladder_diff = 0
+    )
+  
+  gf$Win_Prob = predict(win_model, newdata = gf, type = "response")
+  
+  # Simulate Grand Final result
+  gf <- gf %>%
+    mutate(
+      win = ifelse(runif(n()) < Win_Prob, 1, 0),
+      winner = ifelse(win == 1, team, opponent),
+      loser = ifelse(win == 1, opponent, team)
+    )
+  
+  # Return premier and grand finalist
+  return(list(
+    premier = gf$winner,
+    grand_finalist = c(gf$winner, gf$loser)
+  ))
+}
+#####################################################
+# Run 10,000 simulations
+run_multiple_simulations <- function(n_sims = 10000) {
+  all_teams <- unique(fixture_with_features$team)
+  ladder_positions <- data.frame(team = all_teams)
+  finals_appearances <- data.frame(team = all_teams, appearances = 0)
+  grand_final_appearances <- data.frame(team = all_teams, appearances = 0)
+  premierships <- data.frame(team = all_teams, wins = 0)
+  
+  progress_interval <- n_sims / 10
+  cat("Running", n_sims, "simulations...\n")
+  
+  for (i in 1:n_sims) {
+    if (i %% progress_interval == 0) {
+      cat(i / n_sims * 100, "% complete\n")
+    }
+    
+    sim_result <- simulate_single_season(
+      fixture_with_features, 
+      elo_table_current, 
+      win_prob_glm_1, 
+      seed_value = i
+    )
+    
+    sim_ladder <- sim_result$ladder
+    if (i == 1) {
+      ladder_positions <- sim_ladder %>% select(team, Position)
+    } else {
+      ladder_positions <- ladder_positions %>%
+        left_join(sim_ladder %>% select(team, Position), by = "team") %>%
+        mutate(Position = Position.x + Position.y) %>%
+        select(team, Position)
+    }
+    
+    finals_appearances$appearances <- finals_appearances$appearances + 
+      as.numeric(finals_appearances$team %in% sim_result$finals_teams)
+
+        grand_final_appearances$appearances <- grand_final_appearances$appearances + 
+      as.numeric(grand_final_appearances$team %in% sim_result$grand_finalist)
+    
+    premierships$wins <- premierships$wins + 
+      as.numeric(premierships$team == sim_result$premier)
+  }
+  
+  ladder_positions$avg_position <- ladder_positions$Position / n_sims
+  ladder_positions <- ladder_positions %>% 
+    arrange(avg_position) %>%
+    select(team, avg_position)
+
+  finals_appearances$percentage <- finals_appearances$appearances / n_sims * 100
+  grand_final_appearances$percentage <- grand_final_appearances$appearances / n_sims * 100
+  premierships$percentage <- premierships$wins / n_sims * 100
+  
+  return(list(
+    ladder = ladder_positions,
+    finals = finals_appearances %>% arrange(desc(percentage)),
+    grand_final = grand_final_appearances %>% arrange(desc(percentage)),
+    premier = premierships %>% arrange(desc(percentage))
+  ))
+}
+#####################################################
+# Run the simulations (adjust number if needed)
+sim_results <- run_multiple_simulations(10000)
+
+# Print summary results
+cat("\n=== AFL 2025 Season Prediction (10,000 Simulations) ===\n\n")
+
+cat("Predicted Average Ladder Positions:\n")
+print(sim_results$ladder)
+
+cat("\nPercentage of Simulations Making Finals:\n")
+print(sim_results$finals %>% select(team, percentage))
+
+cat("\nPercentage of Simulations Making Grand Final:\n")
+print(sim_results$grand_final %>% select(team, percentage))
+
+cat("\nPremiership Probabilities:\n")
+print(sim_results$premier %>% select(team, percentage))
+#####################################################
+# Plot premiership probabilities
+ggplot(sim_results$premier, aes(x = reorder(team, percentage), y = percentage)) +
+  geom_col(fill = "darkblue") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), hjust = -0.1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "2025 AFL Premiership Probabilities (10,000 Simulations)",
+       x = "Team",
+       y = "Probability (%)") +
+  theme(panel.grid.minor = element_blank())
+
+# Plot finals probabilities
+ggplot(sim_results$finals, aes(x = reorder(team, percentage), y = percentage)) +
+  geom_col(aes(fill = percentage > 50)) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), hjust = -0.1) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "2025 AFL Finals Probabilities (10,000 Simulations)",
+       x = "Team",
+       y = "Probability (%)") +
+  theme(panel.grid.minor = element_blank()) +
+  scale_fill_manual(values = c("TRUE" = "darkgreen", "FALSE" = "gray70"), guide = "none")
+
+# Visualize average ladder positions
+ggplot(sim_results$ladder, aes(x = reorder(team, -avg_position), y = avg_position)) +
+  geom_col(aes(fill = avg_position <= 8)) +
+  geom_text(aes(label = sprintf("%.1f", avg_position)), vjust = -0.5) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Average Ladder Positions (10,000 Simulations)",
+       x = "Team",
+       y = "Average Position") +
+  scale_fill_manual(values = c("TRUE" = "darkgreen", "FALSE" = "gray70"), name = "Finals") +
+  scale_y_reverse(breaks = 1:18)
+#####################################################
+calculate_odds <- function(probability_df) {
+  odds_df <- probability_df %>%
+    mutate(
+      implied_prob = ifelse(percentage <= 0, 0.1, percentage),
+      decimal_odds = round(100 / implied_prob, 2)
+    )
+  
+  return(odds_df)
+}
+
+premiership_odds <- calculate_odds(sim_results$premier)
+
+premiership_odds_table <- premiership_odds %>%
+  select(team, implied_prob, decimal_odds) %>%
+  arrange(desc(implied_prob)) %>%
+  rename(
+    "Team" = team,
+    "Win Probability (%)" = implied_prob,
+    "Decimal Odds" = decimal_odds
+  )
+
+cat("\n=== 2025 AFL Premiership Betting Odds (10,000 Simulations) ===\n\n")
+print(premiership_odds_table, row.names = FALSE)
