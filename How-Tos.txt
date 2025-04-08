@@ -10,6 +10,14 @@ library(ggplot2)    # Helps you make charts (optional)
 library(fitzRoy)    # Special package for AFL data
 library(elo)        # Used for ELO rating calculations
 
+CREATING A VARIABLE
+
+if I want to store something in the environment I simply name it followed by <- and run the line
+
+hello <- 1 + 2
+
+This was save the number 3 named as hello
+If I print(hello) the number 3 will be outputted 
 
 Getting Data
 Here are some functions from FitzRoy to get data
