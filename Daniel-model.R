@@ -1509,4 +1509,5 @@ poisson_ladder_comparison <- poisson_ladder %>%
     Rank_Diff = abs(Rank - Actual_Rank)
   ) %>%
   arrange(Actual_Rank)
+#####################################################
 
