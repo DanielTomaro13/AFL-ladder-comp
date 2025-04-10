@@ -1434,3 +1434,79 @@ premiership_odds_table <- premiership_odds %>%
 
 cat("\n=== 2025 AFL Premiership Betting Odds (10,000 Simulations) ===\n\n")
 print(premiership_odds_table, row.names = FALSE)
+#####################################################
+# Fit Poisson model using total_score as the response
+poisson_model <- glm(
+  total_score ~ Elo_Difference + home_advantage_score + 
+    form_last_5 + ladder_diff + 
+    diff_tackles + diff_inside50s + diff_contested_possessions + 
+    diff_intercepts + diff_contested_ratio + diff_kick_to_handball_ratio,
+  data = final_results,
+  family = poisson(link = "log")
+)
+
+summary(poisson_model)
+#####################################################
+
+fixture_with_features$Expected_Points <- predict(poisson_model, 
+                                                 newdata = fixture_with_features, 
+                                                 type = "response")
+#####################################################
+set.seed(2025)
+fixture_with_features <- fixture_with_features %>%
+  mutate(
+    Sim_Score = rpois(n(), lambda = Expected_Points)
+  )
+#####################################################
+poisson_sim <- fixture_with_features %>%
+  dplyr::select(game_id, date, season, round, team, opponent, Sim_Score) %>%
+  rename(Team_Score = Sim_Score) %>% filter(season == 2025)
+
+opponent_scores <- poisson_sim %>%
+  dplyr::select(game_id, opponent = team, team = opponent, Opponent_Score = Team_Score)
+
+poisson_results <- poisson_sim %>%
+  left_join(opponent_scores, by = c("game_id", "team", "opponent")) %>%
+  mutate(
+    margin = Team_Score - Opponent_Score,
+    result = case_when(
+      Team_Score > Opponent_Score ~ 1,
+      Team_Score < Opponent_Score ~ 0,
+      TRUE ~ 0.5
+    )
+  )
+#####################################################
+ladder_actual <- final_results %>%
+  filter(season == 2025) %>%
+  group_by(team) %>%
+  summarise(
+    Games = n(),
+    Actual_Wins = sum(result == 1),
+    Actual_Losses = sum(result == 0),
+    Actual_Draws = sum(result == 0.5),
+    Actual_Points = Actual_Wins * 4 + Actual_Draws * 2
+  ) %>%
+  arrange(desc(Actual_Points)) %>%
+  mutate(Actual_Rank = row_number())
+
+poisson_ladder <- poisson_results %>%
+  filter(round < 25) %>%  # Only home & away season
+  group_by(team) %>%
+  summarise(
+    Games = n(),
+    Wins = sum(result == 1),
+    Draws = sum(result == 0.5),
+    Losses = sum(result == 0),
+    Points = Wins * 4 + Draws * 2
+  ) %>%
+  arrange(desc(Points)) %>%
+  mutate(Rank = row_number())
+
+poisson_ladder_comparison <- poisson_ladder %>%
+  left_join(ladder_actual, by = "team") %>%
+  mutate(
+    Point_Diff = Points - Actual_Points,
+    Rank_Diff = abs(Rank - Actual_Rank)
+  ) %>%
+  arrange(Actual_Rank)
+
